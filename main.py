@@ -20,8 +20,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Connect to the exact same embedding model configuration
-# Notice the slightly different import name:
+import zipfile
+import os
+
+if os.path.exists("chroma_db.zip") and not os.path.exists("chroma_db"):
+    with zipfile.ZipFile("chroma_db.zip", 'r') as zip_ref:
+        zip_ref.extractall(".")
+    print("Database unzipped successfully!")
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 
 print("Initializing BGE embedding model...")
@@ -29,31 +34,24 @@ embeddings = HuggingFaceBgeEmbeddings(
     model_name="BAAI/bge-base-en-v1.5",
     model_kwargs={"device": "cpu"},
     encode_kwargs={"normalize_embeddings": True},
-    # This single line fixes the entire hallucination issue:
     query_instruction="Represent this sentence for searching relevant passages: " 
 )
 
-# Initialize your high-performance LLM via Groq
+
+groq_key = os.getenv("GROQ_API_KEY")
+
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
-    temperature=0,
-    api_key=os.getenv("GROQ_API_KEY")
+    temperature=0
+   
 )
 
-# Connect to the disk-persisted vector database
 vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-# Grabbing the top 6 most relevant chunks instead of 3
-# Upgraded from standard similarity to Maximal Marginal Relevance (MMR)
-# 1. Your existing MMR Base Retriever
-# 1. Your existing MMR Base Retriever (Tuned for Multi-Query)
-# 1. Base Retriever: Strict Similarity, Top 1 per query
-# 1. Base Retriever: Strict Similarity with a Bouncer (Score Threshold)
+
+# In main.py
 base_retriever = vectorstore.as_retriever(
-    search_type="similarity_score_threshold",
-    search_kwargs={
-        "k": 6, 
-        "score_threshold": 0.5
-    }
+    search_type="similarity",
+    search_kwargs={"k": 4} # Grab 10 chunks to ensure we don't miss the right one
 )
     # 2. The Custom Legal Translation Prompt
 query_prompt = PromptTemplate(
@@ -78,29 +76,39 @@ advanced_retriever = MultiQueryRetriever.from_llm(
 class ChatRequest(BaseModel):
     query: str
 
-# Engineering strict system prompts protects against hallucinations
-template = """You are an expert Indian criminal defense attorney and legal scholar. 
-Analyze the user's factual scenario strictly using the provided legal context.
-Note: IPC stands for the Indian Penal Code. BNS stands for the Bhartiya Nyaya Sanhita.
-If the user asks about an old IPC section, clearly provide its new BNS equivalent based on the context.
-Always explicitly cite the Code name (IPC/BNS) and Section numbers.
+template = """You are an expert Indian criminal defense attorney. 
+STRICT INSTRUCTION: You must answer the user's question using ONLY the provided 'Context' below.
+If the answer is not contained within the provided context, state that you do not have that specific information in your database.
+DO NOT use your internal training data to guess section numbers.
+Cite the BNS section clearly as '[BNS Sec X]'.
 
 Context:
 {context}
 
 User Query: {question}
-
 Legal Analysis:"""
 prompt = ChatPromptTemplate.from_template(template)
 def format_docs(docs):
-    # This explicitly feeds the mapping (e.g. "[IPC 378 -> BNS 303 - Theft]") directly into the LLM's brain
+    
+    print(f"DEBUG: Retrieved {len(docs)} documents.")
+    for d in docs:
+        print(f"DEBUG: Found {d.metadata.get('section')}")
+        
     return "\n\n".join(
-        f"[IPC Sec {doc.metadata.get('ipc_section', 'N/A')} -> BNS Sec {doc.metadata.get('section', 'N/A')} - {doc.metadata.get('title', '')}]: {doc.page_content}" 
+        f"[BNS Sec {doc.metadata.get('section', 'N/A')}]: {doc.page_content}" 
         for doc in docs
     )
-
+# Add this temporary check to main.py
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    # Retrieve candidates without filtering
+    docs = vectorstore.similarity_search_with_score(request.query, k=10)
+    print("--- SEARCH RESULTS ---")
+    for doc, score in docs:
+        print(f"Section: {doc.metadata.get('section')} | Score: {score}")
+    print("----------------------")
+    
+
     try:
         # Retrieve context matches from Chroma
         retrieved_docs = advanced_retriever.invoke(request.query)
@@ -113,11 +121,24 @@ async def chat_endpoint(request: ChatRequest):
             "question": request.query
         })
         
+        # Ensure metadata has the exact keys the Next.js frontend demands
+        formatted_sources = []
+        for doc in retrieved_docs:
+            source_data = {**doc.metadata, "text": doc.page_content}
+            
+            # If the database forgot to label the code type, force it to "BNS"
+            if "code_type" not in source_data:
+                source_data["code_type"] = "BNS"
+                
+            # Ensure the section number is treated as text, not a math integer
+            if "section" not in source_data:
+                source_data["section"] = str(source_data.get("ipc_section", "N/A"))
+                
+            formatted_sources.append(source_data)
+
         return {
             "answer": response,
-            "sources": [
-                {**doc.metadata, "text": doc.page_content} for doc in retrieved_docs
-            ]
+            "sources": formatted_sources
         }
         
     except Exception as e:
