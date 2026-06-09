@@ -51,7 +51,7 @@ vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddi
 # In main.py
 base_retriever = vectorstore.as_retriever(
     search_type="similarity",
-    search_kwargs={"k": 4} # Grab 10 chunks to ensure we don't miss the right one
+    search_kwargs={"k": 4} 
 )
     # 2. The Custom Legal Translation Prompt
 query_prompt = PromptTemplate(
@@ -69,7 +69,7 @@ query_prompt = PromptTemplate(
     # 3. The Advanced Multi-Query Retriever
 advanced_retriever = MultiQueryRetriever.from_llm(
         retriever=base_retriever,
-        llm=llm, # This uses your existing LLM to rewrite the prompt!
+        llm=llm, 
         prompt=query_prompt
     )
 
@@ -98,7 +98,7 @@ def format_docs(docs):
         f"[BNS Sec {doc.metadata.get('section', 'N/A')}]: {doc.page_content}" 
         for doc in docs
     )
-# Add this temporary check to main.py
+
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     # Retrieve candidates without filtering
@@ -121,7 +121,7 @@ async def chat_endpoint(request: ChatRequest):
             "question": request.query
         })
         
-        # Ensure metadata has the exact keys the Next.js frontend demands
+       
         formatted_sources = []
         for doc in retrieved_docs:
             source_data = {**doc.metadata, "text": doc.page_content}
